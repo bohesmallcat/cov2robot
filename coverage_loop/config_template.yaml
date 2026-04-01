@@ -1,0 +1,58 @@
+# Coverage Loop Configuration
+# Copy this file to config.yaml and edit for your environment.
+
+cluster:
+  ip: "10.x.x.x"                       # storage cluster public IP (any data node)
+  username: "admin"                     # SSH username
+  password: ""                          # SSH password (leave empty to prompt)
+  nodes: []                             # Explicit node IPs; auto-discovered from master if empty
+
+target:
+  service: "cm"                         # cluster service to collect coverage from
+  jacoco_port: 2025                     # JaCoCo TCP port for the service
+  source_code_path: ""                  # Java source path on cluster (for HTML report)
+  class_files_path: ""                  # Compiled JARs/classes path on cluster
+  includes: "com.example.storage.*"       # JaCoCo includes filter
+
+  # JaCoCo paths on cluster nodes (defaults match jacoco_keywords.py)
+  jacoco_lib_dir: "/opt/storage/lib"  # Where jacocoagent.jar and jacococli.jar live
+  exec_dump_dir: "/var/log/jacoco/coverage"  # Where exec files are dumped
+
+execution:
+  automation_dir: "/mnt/c/Users/Danna_C/workspace/automation"
+  initial_suites:                       # Robot suites for round 1
+    - "robot/object/blocklayer/block_read"
+  include_tags: []                      # Test tag filter (empty = all)
+  exclude_tags:                         # Exclude fault injection in auto mode
+    - "FI"
+    - "Standalone"
+  runner_profile: "small"
+  cluster_name: ""                      # Cluster name for runner.py --cluster flag
+  environment: "dev"
+
+analysis:
+  target_classes:                       # Java class HTML files to analyze
+    - "Block.java"
+    - "AbstractBlockData.java"
+  # Relative to the skill repo root (coverage-robot/)
+  coverage_to_robot_script: "skills/coverage-to-robot/scripts/parse_coverage.py"
+
+loop:
+  max_iterations: 5                     # Safety bound
+  target_coverage_pct: 60.0             # Stop when overall coverage reaches this
+  min_delta_pct: 2.0                    # Stop if delta below this for 2 consecutive rounds
+  skip_priority:                        # Don't generate cases for these priorities
+    - "P3"
+
+# PR-targeted coverage analysis (optional).
+# When enabled, only classes changed in the PR are analyzed/reported.
+# Use --pr-url on the CLI, or set pr_url below.
+pr_filtering:
+  pr_url: ""                            # GitHub PR URL (e.g. https://github.example.com/org/storage-service/pull/123)
+  local_repo_path: ""                   # Local clone of the repo (fallback if GitHub API fails)
+  base_ref: "origin/master"             # Base ref for local git diff
+  head_ref: ""                          # Head ref for local git diff (empty = current branch)
+
+output:
+  generated_dir: "generated"            # Where generated .robot files go
+  coverage_data_dir: "coverage-data"    # Where JaCoCo reports are stored per round

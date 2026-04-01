@@ -1,0 +1,29 @@
+{
+  "skill_name": "coverage-to-robot",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I have a JaCoCo/LCOV coverage report for AbstractBlockData.java at c:\\Users\\Danna_C\\Downloads\\LCOV - StorageDataPath_bm.info.html. Can you analyze it and generate Robot Framework test cases to improve the coverage?",
+      "expected_output": "Structured analysis report with coverage summary, identification of uncovered gaps (especially handleFlush method), and Robot Framework test case suggestions targeting the uncovered code paths",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Here's a Java coverage report showing only 37.5% line coverage in AbstractBlockData.java. The main gaps are in handleFlush() method (lines 132-203), handleCopyWriteResponse() (lines 76-78), and handleFlushResponse() (lines 208-209). Generate end-to-end Robot Framework tests to cover these gaps.",
+      "expected_output": "Robot Framework test cases for block flush scenarios, copy-write response handling, and flush response handling with proper storage cluster patterns and coverage tags",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Please analyze this coverage report, then generate new robot test cases to improve: https://ci.example.com/coverage/reports/...",
+      "expected_output": "Parser should download the URL automatically, produce JSON with uncovered_blocks (each mapped to containing_method), partially_covered_methods (sorted by uncovered_lines descending), covered_methods, and uncovered_methods. Report should identify the top gaps from uncovered_blocks (e.g. readDataFromEcBtreeBlock 50 lines, readRemote 42 lines) and from partially_covered_methods (e.g. read at 54.8%, readRemote at 14.1%, tryRemoteCorrection at 7.8%). Robot test cases should cover: large-object write (BFW/3-copy/flush), fault-injection read recovery (disk removal, service restart), geo-replication (remote read, remote correction), EC recovery (BTree block, no-readable-copy fallback), and encrypted D@RE paths.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "I have an LCOV coverage report for Block.java showing 38% line coverage. Most of the uncovered code is inside partially-covered methods like read() (54.8%), readRemote() (14.1%), and write() (49.5%). The parser says there are 147 uncovered blocks. Help me prioritize which gaps to target and generate Robot test cases for the top 10.",
+      "expected_output": "Analysis should use uncovered_blocks sorted by size and partially_covered_methods to prioritize gaps. Should identify that the top blocks are in readDataFromEcBtreeBlock (50 lines, EC error handling), readRemote (42 lines, geo copies), readCopyBlockRemote (38 lines), tryRemoteCorrection (32 lines), etc. Robot test cases should group by test pattern: normal IO (large write, MPU), fault injection (disk removal for read retry, service restart for write retry), geo-replication (remote read, remote correction), and EC recovery (BTree reads after disk failure). Each test should reference specific uncovered_blocks with line ranges.",
+      "files": []
+    }
+  ]
+}

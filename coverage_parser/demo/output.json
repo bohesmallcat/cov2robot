@@ -1,0 +1,309 @@
+﻿{
+  "file": "src/storage/datasvc/libs/client/src/main/java/com/example/storage/data/object/impl/blockwriter/AbstractBlockData.java",
+  "summary": {
+    "lines_hit": 39,
+    "lines_total": 104,
+    "line_coverage": 37.5,
+    "branches_hit": 4,
+    "branches_total": 12,
+    "branch_coverage": 33.3
+  },
+  "uncovered_methods": [],
+  "uncovered_lines": [
+    {
+      "line": 76,
+      "source": ":          0 :         log().info(\"WriteResponse write event offset {} blockOffset {}\","
+    },
+    {
+      "line": 77,
+      "source": ":          0 :                    event.offset, contextData.block.getOffset());"
+    },
+    {
+      "line": 78,
+      "source": ":          0 :         return stay();"
+    },
+    {
+      "line": 99,
+      "source": ":          0 :             log().error(\"Has trigger rotate block\");"
+    },
+    {
+      "line": 100,
+      "source": ":          0 :             return;"
+    },
+    {
+      "line": 133,
+      "source": ":          0 :         BFWPerfCounters.eventFlushTransfer.count(event.createTime);"
+    },
+    {
+      "line": 134,
+      "source": ":          0 :         long startTime = System.nanoTime();"
+    },
+    {
+      "line": 135,
+      "source": ":          0 :         WriteWindow.WritingState writingState = window().writingState(event.flushOffset);"
+    },
+    {
+      "line": 136,
+      "source": "[ -  - ]:          0 :         if (writingState == null) {"
+    },
+    {
+      "line": 138,
+      "source": "[ -  - ]:          0 :             if (contextData.fsm.stateName() != BlockState.SEALED) {"
+    },
+    {
+      "line": 139,
+      "source": ":          0 :                 log().error(\"WSCritical: Can not find WritingState at offset {} when flush [{}, {}) {} count {} reason {}\","
+    },
+    {
+      "line": 140,
+      "source": ":          0 :                             event.flushOffset, event.flushOffset, event.flushOffset + event.flushSize, event.flushSize, event.writeItemCount, event.reason);"
+    },
+    {
+      "line": 142,
+      "source": ":          0 :                 log().warn(\"Can not find WritingState at offset {} when flush [{}, {}) {} count {} reason {}\","
+    },
+    {
+      "line": 143,
+      "source": ":          0 :                             event.flushOffset, event.flushOffset, event.flushOffset + event.flushSize, event.flushSize, event.writeItemCount, event.reason);"
+    },
+    {
+      "line": 145,
+      "source": ":          0 :             return stay();"
+    },
+    {
+      "line": 147,
+      "source": ":          0 :         CompletableFuture.runAsync(() -> {"
+    },
+    {
+      "line": 149,
+      "source": ":          0 :                 log().debug(\"{}_chunk-{} Flush [{}, {}) {} count {} reason {} \","
+    },
+    {
+      "line": 150,
+      "source": ":          0 :                             contextData.pipeId, contextData.block.getBlockId(),"
+    },
+    {
+      "line": 151,
+      "source": ":          0 :                             event.flushOffset, event.flushOffset + event.flushSize, event.flushSize, event.writeItemCount, event.reason);"
+    },
+    {
+      "line": 152,
+      "source": ":          0 :                 contextData.block.flush(event.flushOffset, event.flushSize, contextData.fsm.clientProperties().getMaxWriteTimeoutSeconds() * 1000, (future) -> {"
+    },
+    {
+      "line": 153,
+      "source": ":          0 :                     SSResponsePromise promise = (SSResponsePromise) future;"
+    },
+    {
+      "line": 154,
+      "source": "[ -  - ]:          0 :                     if (promise.isSuccess()) {"
+    },
+    {
+      "line": 155,
+      "source": ":          0 :                         StorageServerMessages.Response response = promise.getResponse().getResponse();"
+    },
+    {
+      "line": 157,
+      "source": ":          0 :                         synchronized (writingState) {"
+    },
+    {
+      "line": 158,
+      "source": "[ -  - ]:          0 :                             if (response.getStatus() == StorageServerMessages.Response.Status.SUCCESS) {"
+    },
+    {
+      "line": 159,
+      "source": ":          0 :                                 writingState.increaseSuccessFlushCount();"
+    },
+    {
+      "line": 161,
+      "source": ":          0 :                                 writingState.increaseErrorFlushCount();"
+    },
+    {
+      "line": 163,
+      "source": ":          0 :                             totalCount = writingState.successFlushCount() + writingState.errorFlushCount();"
+    },
+    {
+      "line": 164,
+      "source": ":          0 :                         }"
+    },
+    {
+      "line": 165,
+      "source": "[ -  - ]:          0 :                         if (response.getStatus() != StorageServerMessages.Response.Status.SUCCESS) {"
+    },
+    {
+      "line": 166,
+      "source": ":          0 :                             log().error(\"{}_chunk-{} Flush [{}, {}) {} count {} reason {} failed, response {} {} \","
+    },
+    {
+      "line": 167,
+      "source": ":          0 :                                         contextData.pipeId, contextData.block.getBlockId(),"
+    },
+    {
+      "line": 168,
+      "source": ":          0 :                                         event.flushOffset, event.flushOffset + event.flushSize, event.flushSize, event.writeItemCount, event.reason,"
+    },
+    {
+      "line": 169,
+      "source": ":          0 :                                         response.getRequestId(), response.getErrorMessage());"
+    },
+    {
+      "line": 170,
+      "source": ":          0 :                             fsmActorRef().tell(new FlushResponseEvent(event.flushOffset, event.flushSize, event.writeItemCount, false, startTime, totalCount), fsmActorRef());"
+    },
+    {
+      "line": 171,
+      "source": "[ -  - ]:          0 :                         } else if (totalCount >= contextData.blockCopiesCount) {"
+    },
+    {
+      "line": 172,
+      "source": ":          0 :                             fsmActorRef().tell(new FlushResponseEvent(event.flushOffset, event.flushSize, event.writeItemCount, true, startTime, totalCount), fsmActorRef());"
+    },
+    {
+      "line": 174,
+      "source": ":          0 :                     } else {"
+    },
+    {
+      "line": 175,
+      "source": ":          0 :                         log().error(\"{}_chunk-{} Flush [{}, {}) {} count {} reason {} failed\","
+    },
+    {
+      "line": 176,
+      "source": ":          0 :                                     contextData.pipeId, contextData.block.getBlockId(),"
+    },
+    {
+      "line": 177,
+      "source": ":          0 :                                     event.flushOffset, event.flushOffset + event.flushSize, event.flushSize, event.writeItemCount, event.reason);"
+    },
+    {
+      "line": 179,
+      "source": ":          0 :                         synchronized (writingState) {"
+    },
+    {
+      "line": 180,
+      "source": ":          0 :                             writingState.increaseErrorFlushCount();"
+    },
+    {
+      "line": 181,
+      "source": ":          0 :                             totalCount = writingState.successFlushCount() + writingState.errorFlushCount();"
+    },
+    {
+      "line": 182,
+      "source": ":          0 :                         }"
+    },
+    {
+      "line": 183,
+      "source": ":          0 :                         fsmActorRef().tell(new FlushResponseEvent(event.flushOffset, event.flushSize, event.writeItemCount, false, startTime, totalCount), fsmActorRef());"
+    },
+    {
+      "line": 185,
+      "source": ":          0 :                     BFWPerfCounters.flushBlock.count(startTime, event.writeItemCount, event.flushSize);"
+    },
+    {
+      "line": 186,
+      "source": ":          0 :                 });"
+    },
+    {
+      "line": 187,
+      "source": ":          0 :             }  catch (Exception e) {"
+    },
+    {
+      "line": 188,
+      "source": ":          0 :                 log().error(\"Flush [{}, {}) {} count {} reason {} failed\","
+    },
+    {
+      "line": 189,
+      "source": ":          0 :                             event.flushOffset, event.flushOffset + event.flushSize, event.flushSize, event.writeItemCount, event.reason, e);"
+    },
+    {
+      "line": 191,
+      "source": ":          0 :                 synchronized (writingState) {"
+    },
+    {
+      "line": 192,
+      "source": ":          0 :                     writingState.increaseErrorFlushCount();"
+    },
+    {
+      "line": 193,
+      "source": ":          0 :                     totalCount = writingState.successFlushCount() + writingState.errorFlushCount();"
+    },
+    {
+      "line": 194,
+      "source": ":          0 :                 }"
+    },
+    {
+      "line": 195,
+      "source": ":          0 :                 fsmActorRef().tell(new FlushResponseEvent(event.flushOffset, event.flushSize, event.writeItemCount, false, startTime, totalCount), fsmActorRef());"
+    },
+    {
+      "line": 196,
+      "source": "[ -  - ]:          0 :                 if (!contextData.block.canContinueWrite()) {"
+    },
+    {
+      "line": 197,
+      "source": ":          0 :                     log().error(\"Flush failed due to block {} was not writable\", contextData.block.getBlockId());"
+    },
+    {
+      "line": 199,
+      "source": ":          0 :             }"
+    },
+    {
+      "line": 200,
+      "source": ":          0 :             BFWPerfCounters.triggerFlushChunk.count(startTime);"
+    },
+    {
+      "line": 201,
+      "source": ":          0 :         }, BFWRootActor.AkkaBFWForkJoinPool);"
+    },
+    {
+      "line": 202,
+      "source": ":          0 :         BFWPerfCounters.chunkActorHandleFlushChunk.count(startTime);"
+    },
+    {
+      "line": 203,
+      "source": ":          0 :         return stay();"
+    },
+    {
+      "line": 208,
+      "source": ":          0 :         log().info(\"FlushResponse event\");"
+    },
+    {
+      "line": 209,
+      "source": ":          0 :         return stay();"
+    }
+  ],
+  "uncovered_branches": [
+    {
+      "line": 98,
+      "source": "[ +  - ]:        145 :         if (contextData.rotateDone) {"
+    },
+    {
+      "line": 136,
+      "source": "[ -  - ]:          0 :         if (writingState == null) {"
+    },
+    {
+      "line": 138,
+      "source": "[ -  - ]:          0 :             if (contextData.fsm.stateName() != BlockState.SEALED) {"
+    },
+    {
+      "line": 154,
+      "source": "[ -  - ]:          0 :                     if (promise.isSuccess()) {"
+    },
+    {
+      "line": 158,
+      "source": "[ -  - ]:          0 :                             if (response.getStatus() == StorageServerMessages.Response.Status.SUCCESS) {"
+    },
+    {
+      "line": 165,
+      "source": "[ -  - ]:          0 :                         if (response.getStatus() != StorageServerMessages.Response.Status.SUCCESS) {"
+    },
+    {
+      "line": 171,
+      "source": "[ -  - ]:          0 :                         } else if (totalCount >= contextData.blockCopiesCount) {"
+    },
+    {
+      "line": 196,
+      "source": "[ -  - ]:          0 :                 if (!contextData.block.canContinueWrite()) {"
+    }
+  ],
+  "covered_methods": []
+}
