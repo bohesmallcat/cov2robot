@@ -9,6 +9,7 @@ Automated test coverage analysis and Robot Framework test generation for Java pr
 - **Multi-format parsing** -- JaCoCo XML, JaCoCo HTML, and LCOV HTML reports; accepts local files and HTTP/HTTPS URLs
 - **AI-assisted test generation** -- produces Robot Framework `.robot` files targeting uncovered code paths
 - **Iterative coverage loop** -- execute tests, collect coverage, analyze gaps, generate new tests, repeat
+- **Jenkins integration** -- trigger Jenkins pipeline builds, collect coverage via JaCoCo plugin API, or use pre-existing build URLs
 - **PR-targeted analysis** -- focus on classes changed in a pull request (GitHub Enterprise API or local `git diff`)
 - **Diff reporting** -- compare coverage between rounds with delta metrics and stop/continue recommendations
 - **No vendor lock-in** -- works with any Java project that produces JaCoCo reports
@@ -45,10 +46,11 @@ coverage-robot/
 
 - Python 3.6+
 - `paramiko` (for SSH-based coverage collection)
+- `requests` (optional, for Jenkins integration)
 - A Java project with JaCoCo coverage reports
 
 ```bash
-pip install paramiko
+pip install paramiko requests
 ```
 
 ### 1. Parse a Coverage Report
@@ -104,6 +106,14 @@ python coverage_loop/coverage_loop.py --config config.yaml --skip-execute
 
 # Resume from a specific round
 python coverage_loop/coverage_loop.py --config config.yaml --start-round 3
+
+# Use a pre-existing Jenkins build for coverage (skips test execution)
+python coverage_loop/coverage_loop.py --config config.yaml \
+    --jenkins-build https://jenkins.example.com/job/test-qe/job/my-cc/119/
+
+# PR-targeted analysis
+python coverage_loop/coverage_loop.py --config config.yaml \
+    --pr-url https://github.example.com/org/repo/pull/123
 ```
 
 ### 3. Standalone Utilities
@@ -129,11 +139,11 @@ python coverage_loop/pr_diff.py \
 ## How the Loop Works
 
 ```
-Phase 1: EXECUTE    Run Robot Framework E2E tests against the cluster
+Phase 1: EXECUTE    Run Robot Framework E2E tests (local or via Jenkins pipeline)
        |
        v
-Phase 2: COLLECT    SSH to each node -> JaCoCo dump -> merge -> HTML report -> pull locally
-       |
+Phase 2: COLLECT    SSH to each node -> JaCoCo dump -> merge -> report -> pull locally
+       |            (or Jenkins fast-path: fetch coverage via JaCoCo plugin API)
        v
 Phase 3: ANALYZE    Parse coverage reports -> identify gaps -> diff against previous round
        |
@@ -197,6 +207,40 @@ pr_filtering:
 ```
 
 See [`coverage_loop/config_template.yaml`](coverage_loop/config_template.yaml) for the full reference with all options documented.
+
+### Jenkins Integration
+
+To execute tests via Jenkins instead of locally:
+
+```yaml
+execution:
+  use_jenkins: true
+  jenkins:
+    base_url: "https://jenkins.example.com"
+    job_path: "test-qe/my-component-test"
+    branch: "master"
+    profile: "large"
+    poll_interval: 60          # seconds between status polls
+    build_timeout: 7200        # max wait time (seconds)
+    enable_coverage: true
+    extra_params: {}           # additional Jenkins parameters
+```
+
+Jenkins credentials are loaded from environment variables or a `.env` file:
+
+```bash
+JENKINS_USERNAME=your-username
+JENKINS_API_TOKEN=your-api-token
+```
+
+You can also skip test execution entirely and use a pre-existing Jenkins build:
+
+```bash
+python coverage_loop/coverage_loop.py --config config.yaml \
+    --jenkins-build https://jenkins.example.com/job/test-qe/job/my-cc/119/
+```
+
+This fetches coverage directly from the Jenkins JaCoCo plugin API (Phases 2+3 combined), then continues with gap analysis and test generation (Phases 4+5).
 
 ## Coverage Gap Prioritization
 

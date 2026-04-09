@@ -21,6 +21,7 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,13 @@ try:
     import yaml
 except ImportError:
     yaml = None
+
+try:
+    import requests as _requests
+    import urllib3 as _urllib3
+    _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    _requests = None
 
 # Import sibling modules
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,6 +87,12 @@ def execute_tests(config, round_num, suite_paths=None):
         Execution result with output_dir, or None on failure.
     """
     exec_cfg = config["execution"]
+
+    # --- Jenkins execution mode ---
+    if exec_cfg.get("use_jenkins", False):
+        log.info("Using Jenkins execution mode for round %d", round_num)
+        return _execute_via_jenkins(config, round_num, suite_paths)
+
     automation_dir = exec_cfg["automation_dir"]
 
     if suite_paths is None:
@@ -206,11 +220,11 @@ def _build_robot_cmd(exec_cfg, config, automation_dir, output_dir,
     # Add service-console paths if they exist
     sc_common = os.path.join(
         os.path.dirname(automation_dir),
-        "service-console", "ECSAutomation", "common",
+        "service-console", "Automation", "common",
     )
     sc_lib = os.path.join(
         os.path.dirname(automation_dir),
-        "service-console", "ECSAutomation", "lib",
+        "service-console", "Automation", "lib",
     )
     for p in (sc_common, sc_lib):
         if os.path.isdir(p):
@@ -268,6 +282,477 @@ def _build_runner_cmd(exec_cfg, config, automation_dir, output_dir,
         cmd.extend(["--exclude-test-tag", tag])
 
     return cmd
+
+
+# ---------------------------------------------------------------------------
+# Phase 1b: Execute Robot tests via Jenkins pipeline
+# ---------------------------------------------------------------------------
+
+def _load_jenkins_credentials():
+    """Load Jenkins credentials from .env or environment variables."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        load_dotenv = None
+
+    env_file = None
+    for search_dir in [os.getcwd(), SCRIPT_DIR]:
+        current = os.path.abspath(search_dir)
+        while True:
+            candidate = os.path.join(current, ".env")
+            if os.path.exists(candidate):
+                env_file = candidate
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        if env_file:
+            break
+
+    if env_file and load_dotenv:
+        load_dotenv(dotenv_path=env_file, override=True)
+    elif env_file:
+        with open(env_file, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ[k.strip()] = v.strip()
+
+    username = os.environ.get("JENKINS_USERNAME", "")
+    token = os.environ.get("JENKINS_API_TOKEN", "")
+    if not username or not token:
+        raise RuntimeError(
+            "Jenkins credentials missing. Need JENKINS_USERNAME and "
+            "JENKINS_API_TOKEN in .env or environment variables."
+        )
+    return username, token
+
+
+def _jenkins_get(url, username, token, timeout=30):
+    """HTTP GET with Jenkins basic auth."""
+    resp = _requests.get(
+        url, auth=(username, token), verify=False, timeout=timeout
+    )
+    resp.raise_for_status()
+    return resp
+
+
+def _jenkins_post(url, username, token, params=None, timeout=30):
+    """HTTP POST with Jenkins basic auth."""
+    resp = _requests.post(
+        url, auth=(username, token), verify=False, timeout=timeout,
+        params=params,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+def _execute_via_jenkins(config, round_num, suite_paths=None):
+    """Execute Robot tests via a Jenkins pipeline build.
+
+    Triggers the configured Jenkins job, polls until the build completes,
+    and returns the result dict compatible with ``execute_tests()``.
+
+    Configuration keys under ``execution.jenkins``:
+        job_path : str
+            Jenkins job path (e.g. 'test-qe/my-component-test').
+        base_url : str
+            Jenkins base URL (e.g. 'https://jenkins.example.com').
+        branch : str, optional
+            Automation repo branch (default: 'master').
+        profile : str, optional
+            Runner profile (default: value of execution.runner_profile).
+        poll_interval : int, optional
+            Seconds between build-status polls (default: 60).
+        build_timeout : int, optional
+            Max seconds to wait for the build to finish (default: 7200).
+        extra_params : dict, optional
+            Additional Jenkins build parameters to pass.
+    """
+    if _requests is None:
+        log.error("requests library not available; cannot use Jenkins mode")
+        return None
+
+    exec_cfg = config["execution"]
+    jenkins_cfg = exec_cfg.get("jenkins", {})
+    job_path = jenkins_cfg.get("job_path", "")
+    if not job_path:
+        log.error("execution.jenkins.job_path not configured")
+        return None
+
+    # Resolve suite paths
+    if suite_paths is None:
+        suite_paths = exec_cfg.get("initial_suites", [])
+    if not suite_paths:
+        log.error("No suite paths specified for Jenkins round %d", round_num)
+        return None
+
+    # Build the SUITE parameter: Jenkins expects the .robot path
+    suite_value = suite_paths[0].rstrip("/")
+    if not suite_value.endswith(".robot"):
+        suite_value += ".robot"
+
+    username, token = _load_jenkins_credentials()
+    base_url = jenkins_cfg.get(
+        "base_url", "https://jenkins.example.com"
+    )
+
+    # Normalize job path for Jenkins API
+    path_parts = [p for p in job_path.strip("/").split("/") if p]
+    if not job_path.startswith("/job/") and not path_parts[0] == "job":
+        api_path = "/job/" + "/job/".join(path_parts)
+    elif path_parts[0] == "job":
+        api_path = "/" + "/".join(path_parts)
+    else:
+        api_path = job_path
+    job_url = base_url.rstrip("/") + api_path
+
+    cluster_name = exec_cfg.get("cluster_name", "")
+    if not cluster_name:
+        cluster_name = config["cluster"]["ip"]
+
+    # Assemble build parameters
+    params = {
+        "AUTOMATION_REPO_BRANCH_NAME": jenkins_cfg.get("branch", "master"),
+        "SUITE": suite_value,
+        "ENVIRONMENT": exec_cfg.get("environment", "dev"),
+        "PLATFORM": exec_cfg.get("platform", "vanilla"),
+        "CLUSTER": cluster_name,
+        "PROFILE": jenkins_cfg.get(
+            "profile", exec_cfg.get("runner_profile", "large")
+        ),
+        "ADVANCED_PARAMETERS": "--python3",
+        "ENABLE_CODE_COVERAGE": str(
+            jenkins_cfg.get("enable_coverage", True)
+        ).lower(),
+    }
+    # Merge any extra params from config
+    params.update(jenkins_cfg.get("extra_params", {}))
+
+    log.info("Triggering Jenkins build: %s", job_url)
+    log.info("Parameters: %s", json.dumps(params, indent=2))
+
+    # Trigger build
+    try:
+        resp = _jenkins_post(
+            "{url}/buildWithParameters".format(url=job_url),
+            username, token, params=params,
+        )
+    except Exception as exc:
+        log.error("Failed to trigger Jenkins build: %s", exc)
+        return None
+
+    queue_url = resp.headers.get("Location", "")
+    if not queue_url:
+        log.error("Jenkins did not return a queue URL")
+        return None
+
+    log.info("Build queued: %s", queue_url)
+
+    # Wait for queue item to get a build number
+    queue_api = queue_url.rstrip("/") + "/api/json"
+    build_number = None
+    build_url = None
+    queue_deadline = time.time() + 300  # 5 min for queue
+    while time.time() < queue_deadline:
+        time.sleep(5)
+        try:
+            qresp = _jenkins_get(queue_api, username, token)
+            qdata = qresp.json()
+            executable = qdata.get("executable")
+            if executable:
+                build_number = executable.get("number")
+                build_url = executable.get("url", "")
+                break
+            if qdata.get("cancelled"):
+                log.error("Jenkins build was cancelled in queue")
+                return None
+        except Exception:
+            pass
+
+    if not build_number:
+        log.error("Timed out waiting for Jenkins build number")
+        return None
+
+    log.info("Jenkins build started: #%s — %s", build_number, build_url)
+
+    # Poll until build completes
+    poll_interval = jenkins_cfg.get("poll_interval", 60)
+    build_timeout = jenkins_cfg.get("build_timeout", 7200)
+    build_api = "{url}/api/json".format(
+        url=build_url.rstrip("/") if build_url else
+        "{jurl}/{num}".format(jurl=job_url, num=build_number)
+    )
+    deadline = time.time() + build_timeout
+
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        try:
+            bresp = _jenkins_get(build_api, username, token)
+            bdata = bresp.json()
+            building = bdata.get("building", True)
+            result = bdata.get("result")
+            duration_ms = bdata.get("duration", 0)
+
+            if not building and result:
+                duration_s = duration_ms / 1000.0
+                log.info(
+                    "Jenkins build #%s finished: %s (%.0fs / %.1f min)",
+                    build_number, result, duration_s, duration_s / 60,
+                )
+                exit_code = 0 if result == "SUCCESS" else 1
+                return {
+                    "round": round_num,
+                    "output_dir": None,  # no local output dir
+                    "jenkins_build_url": build_url,
+                    "results": [{
+                        "suite": suite_paths[0],
+                        "exit_code": exit_code,
+                        "jenkins_build": build_number,
+                        "jenkins_url": build_url,
+                        "jenkins_result": result,
+                        "duration_s": duration_s,
+                    }],
+                }
+            else:
+                elapsed = time.time() - (deadline - build_timeout)
+                log.info(
+                    "Jenkins build #%s still running (%.0f min elapsed)...",
+                    build_number, elapsed / 60,
+                )
+        except Exception as exc:
+            log.warning("Error polling Jenkins build: %s", exc)
+
+    log.error(
+        "Jenkins build #%s did not finish within %ds", build_number,
+        build_timeout,
+    )
+    return {
+        "round": round_num,
+        "output_dir": None,
+        "jenkins_build_url": build_url,
+        "results": [{
+            "suite": suite_paths[0],
+            "exit_code": -1,
+            "error": "jenkins_timeout",
+            "jenkins_build": build_number,
+            "jenkins_url": build_url,
+        }],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: Collect coverage from Jenkins JaCoCo plugin API
+# ---------------------------------------------------------------------------
+
+def _collect_coverage_from_jenkins(build_url, config, round_num,
+                                   pr_context=None):
+    """Fetch per-class coverage from the Jenkins JaCoCo plugin REST API.
+
+    This replaces the SSH-based ``collect_coverage`` + ``analyze_coverage``
+    phases when the Jenkins pipeline already handles JaCoCo dump/merge/report.
+
+    Parameters
+    ----------
+    build_url : str
+        Full Jenkins build URL (e.g.
+        ``https://jenkins.example.com/job/test-qe/job/my-cc/119/``).
+    config : dict
+        Full configuration.
+    round_num : int
+        Current round number.
+    pr_context : dict, optional
+        PR context containing ``changed_classes`` set.
+
+    Returns
+    -------
+    dict or None
+        Same format as ``analyze_coverage()``: mapping of
+        fully-qualified class name -> coverage dict.
+    """
+    if _requests is None:
+        log.error("requests library not available; cannot query Jenkins API")
+        return None
+
+    username, token = _load_jenkins_credentials()
+    jacoco_base = build_url.rstrip("/") + "/jacoco"
+
+    # --- Determine which packages/classes to fetch ---
+    changed_classes = None
+    if pr_context:
+        changed_classes = pr_context.get("changed_classes")
+
+    analysis_cfg = config.get("analysis", {})
+    target_packages = analysis_cfg.get("target_packages", [])
+    if not target_packages:
+        includes = config.get("target", {}).get("includes", "")
+        if includes:
+            target_packages = [includes.rstrip(".*")]
+
+    # --- Step 1: List all packages from JaCoCo plugin ---
+    log.info("Fetching JaCoCo package list from Jenkins...")
+    try:
+        resp = _jenkins_get(jacoco_base + "/", username, token)
+    except Exception as exc:
+        log.error("Failed to fetch JaCoCo page: %s", exc)
+        return None
+
+    pkg_links = re.findall(r'href="(com\.[^"]+/)"', resp.text)
+    all_packages = sorted(set(p.rstrip("/") for p in pkg_links))
+    log.info("Found %d packages in JaCoCo report", len(all_packages))
+
+    # Filter packages
+    pr_filter_missed = False
+    if changed_classes:
+        # PR-mode: only packages that contain changed classes
+        pr_packages = set()
+        for fqn in changed_classes:
+            pkg = fqn.rsplit(".", 1)[0] if "." in fqn else fqn
+            pr_packages.add(pkg)
+        packages_to_fetch = [
+            p for p in all_packages if p in pr_packages
+        ]
+        if packages_to_fetch:
+            log.info(
+                "PR-mode: filtered to %d packages containing changed classes",
+                len(packages_to_fetch),
+            )
+        else:
+            # PR classes not in JaCoCo scope — collect ALL available packages
+            # so we still get useful coverage data from the build
+            pr_filter_missed = True
+            log.warning(
+                "PR-mode: none of the %d changed-class packages found in "
+                "JaCoCo report (%d packages available). "
+                "Collecting ALL available packages instead.",
+                len(pr_packages), len(all_packages),
+            )
+            log.info(
+                "  PR packages wanted: %s",
+                ", ".join(sorted(pr_packages)),
+            )
+            log.info(
+                "  JaCoCo packages available: %s",
+                ", ".join(all_packages),
+            )
+            packages_to_fetch = all_packages
+    elif target_packages:
+        packages_to_fetch = [
+            p for p in all_packages
+            if any(p.startswith(tp) for tp in target_packages)
+        ]
+        log.info(
+            "Filtered to %d target packages", len(packages_to_fetch),
+        )
+    else:
+        packages_to_fetch = all_packages
+
+    if not packages_to_fetch:
+        log.warning("No matching packages found in JaCoCo report")
+        return None
+
+    # --- Step 2: For each package, list classes and fetch coverage ---
+    results = {}
+
+    for pkg_name in packages_to_fetch:
+        log.info("  Package: %s", pkg_name)
+        pkg_url = "{base}/{pkg}/".format(base=jacoco_base, pkg=pkg_name)
+        try:
+            pkg_resp = _jenkins_get(pkg_url, username, token)
+        except Exception as exc:
+            log.warning("  Failed to fetch package %s: %s", pkg_name, exc)
+            continue
+
+        # Parse class links from the package page
+        class_links = re.findall(r'href="([A-Z][a-zA-Z0-9_]+/)"', pkg_resp.text)
+        class_names = sorted(set(c.rstrip("/") for c in class_links))
+
+        for cls_name in class_names:
+            cls_fqn = "{pkg}.{cls}".format(pkg=pkg_name, cls=cls_name)
+
+            # Skip inner classes
+            if "$" in cls_name:
+                continue
+
+            # PR-mode filter (skip if PR packages ARE in JaCoCo scope)
+            if (changed_classes and not pr_filter_missed
+                    and cls_fqn not in changed_classes):
+                continue
+
+            # Fetch class-level coverage from API
+            cls_api = "{base}/{pkg}/{cls}/api/json".format(
+                base=jacoco_base, pkg=pkg_name, cls=cls_name,
+            )
+            try:
+                cls_resp = _jenkins_get(cls_api, username, token)
+                cls_data = cls_resp.json()
+            except Exception as exc:
+                log.warning("  Failed to fetch class %s: %s", cls_fqn, exc)
+                continue
+
+            # Transform to the standard coverage dict format
+            line_ctr = cls_data.get("lineCoverage", {})
+            branch_ctr = cls_data.get("branchCoverage", {})
+            method_ctr = cls_data.get("methodCoverage", {})
+            instr_ctr = cls_data.get("instructionCoverage", {})
+
+            line_total = line_ctr.get("total", 0)
+            line_covered = line_ctr.get("covered", 0)
+            line_missed = line_ctr.get("missed", 0)
+            line_pct = (
+                100.0 * line_covered / line_total if line_total > 0 else 0.0
+            )
+
+            branch_total = branch_ctr.get("total", 0)
+            branch_covered = branch_ctr.get("covered", 0)
+            branch_pct = (
+                100.0 * branch_covered / branch_total
+                if branch_total > 0 else 0.0
+            )
+
+            results[cls_fqn] = {
+                "class": cls_fqn,
+                "source_file": "",
+                "package": pkg_name,
+                "summary": {
+                    "line_coverage": round(line_pct, 1),
+                    "branch_coverage": round(branch_pct, 1),
+                    "lines_hit": line_covered,
+                    "lines_total": line_total,
+                    "lines_missed": line_missed,
+                    "branches_hit": branch_covered,
+                    "branches_total": branch_total,
+                    "methods_hit": method_ctr.get("covered", 0),
+                    "methods_total": method_ctr.get("total", 0),
+                    "instructions_hit": instr_ctr.get("covered", 0),
+                    "instructions_total": instr_ctr.get("total", 0),
+                },
+                # Method-level detail not available from plugin API
+                "methods": [],
+                "uncovered_methods": [],
+                "partially_covered_methods": [],
+            }
+
+            log.info(
+                "    %s: line %.1f%% (%d/%d), branch %.1f%%",
+                cls_name, line_pct, line_covered, line_total, branch_pct,
+            )
+
+    if not results:
+        log.warning("No class coverage data retrieved from Jenkins")
+        return None
+
+    log.info(
+        "Jenkins JaCoCo API: %d classes retrieved (%d with coverage)",
+        len(results),
+        sum(1 for r in results.values()
+            if r["summary"]["lines_hit"] > 0),
+    )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1418,7 +1903,7 @@ def should_continue(config, round_num, diff_results):
 # ---------------------------------------------------------------------------
 
 def run_loop(config, start_round=1, max_iterations=None, skip_execute=False,
-             pr_url=None):
+             pr_url=None, jenkins_build_url=None):
     """
     Run the full coverage improvement loop.
 
@@ -1435,6 +1920,9 @@ def run_loop(config, start_round=1, max_iterations=None, skip_execute=False,
     pr_url : str, optional
         GitHub Enterprise PR URL.  When provided, coverage analysis is
         restricted to Java classes changed in the PR.
+    jenkins_build_url : str, optional
+        Jenkins build URL to fetch coverage from directly (skips test
+        execution; uses JaCoCo plugin API for coverage data).
     """
     if max_iterations is not None:
         config.setdefault("loop", {})["max_iterations"] = max_iterations
@@ -1488,7 +1976,15 @@ def run_loop(config, start_round=1, max_iterations=None, skip_execute=False,
             "  PR classes: %d",
             len(pr_context.get("changed_classes", set())),
         )
+    if jenkins_build_url:
+        log.info("  Jenkins build (pre-existing): %s", jenkins_build_url)
     log.info("=" * 60)
+
+    # When --jenkins-build is provided, override: skip execution,
+    # use the given build URL for coverage collection.
+    cli_jenkins_build_url = jenkins_build_url  # save for first round
+    if jenkins_build_url:
+        skip_execute = True
 
     consecutive_diminishing = 0
     suite_paths = None  # Use initial_suites for round 1
@@ -1516,24 +2012,70 @@ def run_loop(config, start_round=1, max_iterations=None, skip_execute=False,
             log.info("Waiting 10s for JaCoCo data to settle...")
             time.sleep(10)
         else:
+            exec_result = None
             log.info("--- Phase 1: SKIPPED (--skip-execute) ---")
 
-        # Phase 2: Collect
-        log.info("--- Phase 2: Collect Coverage ---")
-        collect_result = collect_coverage(config, round_num)
-        if collect_result is None:
-            log.error("Coverage collection failed; stopping loop")
-            break
-
-        html_dir = collect_result.get("html_dir", "")
-        xml_path = collect_result.get("xml_file", None)
-
-        # Phase 3: Analyze
-        log.info("--- Phase 3: Analyze Coverage ---")
-        coverage_results = analyze_coverage(
-            config, round_num, html_dir=html_dir, xml_path=xml_path,
-            pr_context=pr_context,
+        # --- Jenkins fast-path: collect + analyze via JaCoCo plugin API ---
+        jenkins_build_url = (
+            exec_result.get("jenkins_build_url")
+            if exec_result else cli_jenkins_build_url
         )
+        coverage_results = None
+
+        if jenkins_build_url:
+            log.info("--- Phase 2+3: Collect & Analyze via Jenkins API ---")
+            log.info("Build URL: %s", jenkins_build_url)
+            coverage_results = _collect_coverage_from_jenkins(
+                jenkins_build_url, config, round_num,
+                pr_context=pr_context,
+            )
+            if coverage_results:
+                # Save per-class JSON files (same as analyze_coverage does)
+                coverage_data_dir = config["output"].get(
+                    "coverage_data_dir", "coverage-data"
+                )
+                round_dir = os.path.join(
+                    coverage_data_dir,
+                    "round_{n}".format(n=round_num),
+                )
+                os.makedirs(round_dir, exist_ok=True)
+                for cls_fqn, data in coverage_results.items():
+                    safe_name = cls_fqn.replace(".", "_")
+                    out_file = os.path.join(
+                        round_dir,
+                        "{cls}_coverage.json".format(cls=safe_name),
+                    )
+                    with open(out_file, "w") as f:
+                        json.dump(data, f, indent=2)
+                _write_round_summary(round_dir, round_num, coverage_results)
+                log.info(
+                    "Jenkins API: %d classes analyzed", len(coverage_results),
+                )
+            else:
+                log.warning(
+                    "Jenkins API returned no data; "
+                    "falling back to local collect + analyze"
+                )
+
+        # --- Fallback: local SSH-based collect + analyze ---
+        if coverage_results is None:
+            # Phase 2: Collect
+            log.info("--- Phase 2: Collect Coverage (local SSH) ---")
+            collect_result = collect_coverage(config, round_num)
+            if collect_result is None:
+                log.error("Coverage collection failed; stopping loop")
+                break
+
+            html_dir = collect_result.get("html_dir", "")
+            xml_path = collect_result.get("xml_file", None)
+
+            # Phase 3: Analyze
+            log.info("--- Phase 3: Analyze Coverage (local) ---")
+            coverage_results = analyze_coverage(
+                config, round_num, html_dir=html_dir, xml_path=xml_path,
+                pr_context=pr_context,
+            )
+
         if not coverage_results:
             log.warning("No coverage data analyzed; stopping loop")
             break
@@ -1742,6 +2284,13 @@ def main():
              "the PR.",
     )
     parser.add_argument(
+        "--jenkins-build",
+        help="Jenkins build URL to fetch coverage from (skips test "
+             "execution, collects coverage via JaCoCo plugin API). "
+             "E.g. https://jenkins.example.com/job/test-qe/"
+             "job/my-component-cc/119/",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
     )
@@ -1758,6 +2307,7 @@ def main():
         max_iterations=args.max_iterations,
         skip_execute=args.skip_execute,
         pr_url=args.pr_url,
+        jenkins_build_url=args.jenkins_build,
     )
 
     return 0
